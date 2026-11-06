@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <limits>
 #include <vector>
@@ -283,8 +284,17 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             .basePipelineHandle = 0,
             .basePipelineIndex = 0,
         };
+        // Local diagnostic: a driver that never returns from vkCreateComputePipelines leaves a
+        // "start" line without its "done" line, naming the shader to reject.
+        LOG_INFO(Render_Vulkan, "Compute pipeline driver build start: shader {:016x}", shader_hash);
+        const auto driver_begin = std::chrono::steady_clock::now();
         try {
             pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            LOG_INFO(Render_Vulkan, "Compute pipeline driver build done: shader {:016x} in {} ms",
+                     shader_hash,
+                     std::chrono::duration_cast<std::chrono::milliseconds>(
+                         std::chrono::steady_clock::now() - driver_begin)
+                         .count());
         } catch (const vk::Exception& exception) {
             LOG_CRITICAL(Render_Vulkan, "Adreno rejected compute shader {:016X}: {}", shader_hash,
                          exception.what());
