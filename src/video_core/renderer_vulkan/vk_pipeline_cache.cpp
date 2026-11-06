@@ -5,9 +5,14 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <string>
 #include <iostream>
 #include <memory>
 #include <span>
@@ -58,6 +63,41 @@
 namespace Vulkan {
 
 namespace {
+// EDEN_NX2_SPIRV_DUMP=<dir> with EDEN_NX2_SPIRV_DUMP_HASHES=<hash>,...: writes the SPIR-V of the
+// listed graphics stages to <dir>/<hash>_<stage>[_shufflefallback].spv before the driver sees
+// it. Unlike gpu_log_shader_dumps it writes only the listed shaders, so a crash in the driver
+// still leaves the modules of the pipeline that caused it on disk.
+void DumpSelectedSpirv(u64 hash, size_t stage_index, std::span<const u32> code) {
+    static const std::string directory = [] {
+        const char* value = std::getenv("EDEN_NX2_SPIRV_DUMP");
+        return value ? std::string{value} : std::string{};
+    }();
+    static const std::string hashes = [] {
+        const char* value = std::getenv("EDEN_NX2_SPIRV_DUMP_HASHES");
+        std::string list = value ? "," + std::string{value} + "," : std::string{};
+        std::ranges::transform(list, list.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return list;
+    }();
+    if (directory.empty() || hashes.find(fmt::format(",{:016x},", hash)) == std::string::npos) {
+        return;
+    }
+    static constexpr std::array stage_names{"vertex", "tess_control", "tess_eval", "geometry",
+                                            "fragment"};
+    const char* fallback = std::getenv("EDEN_NX2_FRAGMENT_SHUFFLE_FALLBACK");
+    const bool uses_fallback = fallback != nullptr && fallback[0] != '0';
+    const auto path = std::filesystem::path{directory} /
+                      fmt::format("{:016x}_{}{}.spv", hash,
+                                  stage_index < stage_names.size() ? stage_names[stage_index]
+                                                                   : "stage",
+                                  uses_fallback ? "_shufflefallback" : "");
+    std::ofstream file{path, std::ios::binary | std::ios::trunc};
+    file.write(reinterpret_cast<const char*>(code.data()),
+               static_cast<std::streamsize>(code.size_bytes()));
+    file.flush();
+    LOG_INFO(Render_Vulkan, "Dumped SPIR-V {} ({} bytes)", path.string(), code.size_bytes());
+}
+
 using Shader::Backend::SPIRV::EmitSPIRV;
 using Shader::Maxwell::ConvertLegacyToGeneric;
 using Shader::Maxwell::GenerateGeometryPassthrough;
@@ -1225,6 +1265,7 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         const std::vector<u32> code{EmitSPIRV(profile, runtime_info, program, binding)};
         device.SaveShader(code);
         modules[stage_index] = BuildShader(device, code);
+        DumpSelectedSpirv(key.unique_hashes[index], stage_index, code);
 
         // Text log + .spv dump. Text log is gated by gpu_log_level != Off; .spv dump
         // is independent and gated only by gpu_log_shader_dumps.
