@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -1238,6 +1239,16 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         flags |= VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     }
 
+    // Local diagnostic: a driver that crashes or never returns from vkCreateGraphicsPipelines
+    // leaves a "start" line without its "done" line, naming the stage shaders to reject.
+    std::string stage_hashes;
+    for (size_t stage = 0; stage < key.unique_hashes.size(); ++stage) {
+        if (key.unique_hashes[stage] != 0) {
+            stage_hashes += fmt::format(" s{}:{:016x}", stage, key.unique_hashes[stage]);
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Graphics pipeline driver build start:{}", stage_hashes);
+    const auto driver_begin = std::chrono::steady_clock::now();
     pipeline = device.GetLogical().CreateGraphicsPipeline({
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,
@@ -1259,6 +1270,10 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
     }, *pipeline_cache);
+    LOG_INFO(Render_Vulkan, "Graphics pipeline driver build done:{} in {} ms", stage_hashes,
+             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                   driver_begin)
+                 .count());
 
     // Log graphics pipeline creation
     if (GPU::Logging::IsActive()) {
