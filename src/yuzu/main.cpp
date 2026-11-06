@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -35,6 +36,90 @@
 
 #ifdef _WIN32
 #include <QScreen>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <atomic>
+#include <cstdio>
+
+// EDEN_NX2_CRASH_DUMP=<dir>: on an unhandled exception (a real crash; fastmem faults are handled
+// before this), write <dir>\lichii-crash-<pid>.txt with the faulting address and the call stack as
+// module+offset (resolve with the module's PDB), then <dir>\lichii-crash-<pid>.dmp. The same
+// switch eden-cli has, for crashes that only reproduce while playing in the GUI.
+static void WriteCodeAddress(std::FILE* out, const char* label, const void* address) {
+    HMODULE module{};
+    char name[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCSTR>(address), &module)) {
+        GetModuleFileNameA(module, name, sizeof(name));
+    }
+    const char* base_name = std::strrchr(name, '\\');
+    std::fprintf(out, "  %s %p %s+%#llx\n", label, address, base_name ? base_name + 1 : name,
+                 static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(address) -
+                                                 reinterpret_cast<uintptr_t>(module)));
+}
+
+namespace Vulkan {
+// The pipeline the current thread is handing to the driver (vk_graphics_pipeline.cpp).
+const char* CurrentDriverBuild();
+} // namespace Vulkan
+
+static LONG WINAPI WriteGuiCrashDump(EXCEPTION_POINTERS* exception) {
+    static std::atomic<bool> written{};
+    const char* directory = std::getenv("EDEN_NX2_CRASH_DUMP");
+    if (directory == nullptr || written.exchange(true)) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    char path[MAX_PATH];
+    std::snprintf(path, sizeof(path), "%s\\lichii-crash-%lu.txt", directory, GetCurrentProcessId());
+    if (std::FILE* out = std::fopen(path, "w")) {
+        const EXCEPTION_RECORD& record = *exception->ExceptionRecord;
+        std::fprintf(out, "Unhandled exception %#lx on thread %lu, info %#llx %#llx\n",
+                     record.ExceptionCode, GetCurrentThreadId(),
+                     static_cast<unsigned long long>(
+                         record.NumberParameters > 0 ? record.ExceptionInformation[0] : 0),
+                     static_cast<unsigned long long>(
+                         record.NumberParameters > 1 ? record.ExceptionInformation[1] : 0));
+        WriteCodeAddress(out, "at", record.ExceptionAddress);
+        const char* driver_build = Vulkan::CurrentDriverBuild();
+        std::fprintf(out, "Driver build on this thread: %s\n",
+                     driver_build[0] != '\0' ? driver_build : "(none)");
+        void* frames[62];
+        const USHORT count = RtlCaptureStackBackTrace(0, 62, frames, nullptr);
+        for (USHORT i = 0; i < count; ++i) {
+            WriteCodeAddress(out, "frame", frames[i]);
+        }
+        std::fclose(out);
+    }
+    struct ExceptionInformation {
+        DWORD thread_id;
+        EXCEPTION_POINTERS* exception_pointers;
+        BOOL client_pointers;
+    };
+    using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int,
+                                              const ExceptionInformation*, const void*, const void*);
+    const HMODULE dbghelp = LoadLibraryA("dbghelp.dll");
+    const auto write = dbghelp ? reinterpret_cast<MiniDumpWriteDumpFn>(
+                                     GetProcAddress(dbghelp, "MiniDumpWriteDump"))
+                               : nullptr;
+    if (write == nullptr) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    std::snprintf(path, sizeof(path), "%s\\lichii-crash-%lu.dmp", directory, GetCurrentProcessId());
+    const HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        const ExceptionInformation information{GetCurrentThreadId(), exception, FALSE};
+        // MiniDumpWithThreadInfo, as eden-cli writes it.
+        write(GetCurrentProcess(), GetCurrentProcessId(), file, 0x1000, &information, nullptr,
+              nullptr);
+        CloseHandle(file);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 
 static void OverrideWindowsFont() {
     // Qt5 chooses these fonts on Windows and they have fairly ugly alphanumeric/cyrillic characters
@@ -163,6 +248,11 @@ static void LoadNx2Switches(const char* argv0) {
 
 int main(int argc, char* argv[]) {
     LoadNx2Switches(argv[0]);
+#ifdef _WIN32
+    if (std::getenv("EDEN_NX2_CRASH_DUMP") != nullptr) {
+        SetUnhandledExceptionFilter(WriteGuiCrashDump);
+    }
+#endif
 #if YUZU_ROOM
     bool launch_room = false;
     for (int i = 1; i < argc; i++) {

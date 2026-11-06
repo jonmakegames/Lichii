@@ -34,6 +34,9 @@
 
 namespace Vulkan {
 
+// Defined in vk_graphics_pipeline.cpp; read by the GUI crash handler.
+void SetCurrentDriverBuild(std::string description);
+
 using Shader::ImageBufferDescriptor;
 using Shader::Backend::SPIRV::RESCALING_LAYOUT_WORDS_OFFSET;
 using Tegra::Texture::TexturePair;
@@ -287,9 +290,11 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         // Local diagnostic: a driver that never returns from vkCreateComputePipelines leaves a
         // "start" line without its "done" line, naming the shader to reject.
         LOG_INFO(Render_Vulkan, "Compute pipeline driver build start: shader {:016x}", shader_hash);
+        SetCurrentDriverBuild(fmt::format("compute pipeline shader {:016x}", shader_hash));
         const auto driver_begin = std::chrono::steady_clock::now();
         try {
             pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            SetCurrentDriverBuild({});
             LOG_INFO(Render_Vulkan, "Compute pipeline driver build done: shader {:016x} in {} ms",
                      shader_hash,
                      std::chrono::duration_cast<std::chrono::milliseconds>(

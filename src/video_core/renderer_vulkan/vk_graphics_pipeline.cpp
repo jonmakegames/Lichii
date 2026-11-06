@@ -44,6 +44,20 @@
 #endif
 
 namespace Vulkan {
+
+// The pipeline this thread is handing to the driver right now. The log is written late and loses
+// its last lines when the driver crashes, so the GUI crash handler (EDEN_NX2_CRASH_DUMP) reads
+// this from the crashing thread instead.
+static thread_local std::string current_driver_build;
+
+const char* CurrentDriverBuild() {
+    return current_driver_build.c_str();
+}
+
+void SetCurrentDriverBuild(std::string description) {
+    current_driver_build = std::move(description);
+}
+
 namespace {
 using boost::container::small_vector;
 using boost::container::static_vector;
@@ -1248,6 +1262,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         }
     }
     LOG_INFO(Render_Vulkan, "Graphics pipeline driver build start:{}", stage_hashes);
+    SetCurrentDriverBuild("graphics pipeline" + stage_hashes);
     const auto driver_begin = std::chrono::steady_clock::now();
     pipeline = device.GetLogical().CreateGraphicsPipeline({
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -1270,6 +1285,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
     }, *pipeline_cache);
+    SetCurrentDriverBuild({});
     LOG_INFO(Render_Vulkan, "Graphics pipeline driver build done:{} in {} ms", stage_hashes,
              std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
                                                                    driver_begin)
